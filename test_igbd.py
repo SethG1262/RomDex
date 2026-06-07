@@ -1,16 +1,13 @@
 from services.igdb_service import IGDBService
 
+service = IGDBService()
 
-igdb = IGDBService()
+print(service.credentials_are_ready())
 
-print("Checking platform IDs...")
-platforms = igdb.search_platforms("Nintendo DSi")
+results = service.search_3ds_and_dsi_games("Pokemon")
 
-for platform in platforms:
-    print(platform)
-
-print("\nSearching 3DS games...")
-games = igdb.search_3ds_games("pokemon")
-
-for game in games:
+for game in results:
     print(game.get("name"))
+    print(game.get("platforms"))
+    print(game.get("cover"))
+    print()
