@@ -166,5 +166,13 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
+    # Initialize the database (creates SQLite file and tables)
+    try:
+        from services.db import init_db
+
+        init_db()
+    except Exception:
+        pass
+
     app = App()
     app.mainloop()
