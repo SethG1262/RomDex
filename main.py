@@ -1,5 +1,8 @@
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
+import requests
+from io import BytesIO
+from PIL import Image, ImageTk
 
 from services.db import init_db
 import models.game
@@ -13,10 +16,11 @@ class App(tk.Tk):
         super().__init__()
 
         self.title("RomDex")
-        self.geometry("1000x650")
-        self.minsize(850, 500)
+        self.geometry("1100x700")
+        self.minsize(950, 600)
 
         self.game_repository = GameRepository()
+        self.cover_image = None
 
         self._create_tabs()
         self._create_library_widgets()
@@ -71,25 +75,64 @@ class App(tk.Tk):
         )
         discover_button.pack(side="left", padx=5)
 
-        columns = ("title", "platform", "genre", "status")
+        content_frame = tk.Frame(self.library_tab)
+        content_frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        columns = ("title", "platform", "type", "status")
 
         self.game_table = ttk.Treeview(
-            self.library_tab,
+            content_frame,
             columns=columns,
             show="headings"
         )
 
         self.game_table.heading("title", text="Title")
         self.game_table.heading("platform", text="Platform")
-        self.game_table.heading("genre", text="Genre")
+        self.game_table.heading("type", text="Type")
         self.game_table.heading("status", text="Status")
 
-        self.game_table.column("title", width=250)
+        self.game_table.column("title", width=300)
         self.game_table.column("platform", width=150)
-        self.game_table.column("genre", width=150)
+        self.game_table.column("type", width=140)
         self.game_table.column("status", width=100)
 
-        self.game_table.pack(fill="both", expand=True, padx=20, pady=20)
+        self.game_table.pack(side="left", fill="both", expand=True)
+
+        self.game_table.bind("<<TreeviewSelect>>", self._on_library_game_selected)
+
+        details_frame = tk.Frame(content_frame)
+        details_frame.pack(side="right", fill="both", padx=(15, 0))
+
+        details_label = tk.Label(
+            details_frame,
+            text="Game Info",
+            font=("Arial", 12, "bold")
+        )
+        details_label.pack(anchor="w")
+
+        self.cover_frame = tk.Frame(
+            details_frame,
+            width=260,
+            height=360,
+            relief="groove",
+            borderwidth=2
+        )
+        self.cover_frame.pack(pady=(5, 10))
+        self.cover_frame.pack_propagate(False)
+
+        self.cover_label = tk.Label(
+            self.cover_frame,
+            text="No cover selected"
+        )
+        self.cover_label.pack(fill="both", expand=True)
+
+        self.library_details_text = tk.Text(
+            details_frame,
+            width=45,
+            height=12,
+            wrap="word"
+        )
+        self.library_details_text.pack(fill="both", expand=True)
 
         bottom_frame = tk.Frame(self.library_tab)
         bottom_frame.pack(fill="x", padx=20, pady=10)
@@ -144,7 +187,45 @@ class App(tk.Tk):
         messagebox.showinfo("Search", f"Searching for: {search_text}")
 
     def _add_game(self):
-        messagebox.showinfo("Add Game", "This will open the Add Game window later.")
+        rom_paths = filedialog.askopenfilenames(
+            title="Select Nintendo DS ROM files",
+            filetypes=[
+                ("Nintendo DS ROMs", "*.nds"),
+                ("All Files", "*.*")
+            ]
+        )
+
+        if not rom_paths:
+            return
+
+        added_count = 0
+        skipped_count = 0
+
+        try:
+            for rom_path in rom_paths:
+                if not rom_path.lower().endswith(".nds"):
+                    skipped_count += 1
+                    continue
+
+                existing_game = self.game_repository.get_game_by_rom_path(rom_path)
+
+                if existing_game:
+                    skipped_count += 1
+                    continue
+
+                self.game_repository.add_local_rom(rom_path)
+                added_count += 1
+
+            self._load_library_games()
+
+            messagebox.showinfo(
+                "Add Game Complete",
+                f"Added {added_count} game file(s).\n"
+                f"Skipped {skipped_count} file(s)."
+            )
+
+        except Exception as error:
+            messagebox.showerror("Add Game Error", str(error))
 
     def _discover_games(self):
         self.notebook.select(self.discovery_tab)
@@ -154,6 +235,117 @@ class App(tk.Tk):
 
         if selected_tab == str(self.library_tab):
             self._load_library_games()
+
+    def _on_library_game_selected(self, event):
+        selected_item = self.game_table.selection()
+
+        if not selected_item:
+            return
+
+        game_id = int(selected_item[0])
+        game = self.game_repository.get_game_by_id(game_id)
+
+        if not game:
+            return
+
+        has_local_rom = bool(game.rom_path)
+        has_igdb_metadata = bool(game.igdb_id)
+
+        if game.cover_url:
+            self.cover_frame.pack(pady=(5, 10))
+            self._load_cover_art(game.cover_url)
+        else:
+            self.cover_frame.pack_forget()
+            self.cover_image = None
+
+        if has_local_rom and has_igdb_metadata:
+            game_type = "Local ROM + IGDB Metadata"
+        elif has_local_rom:
+            game_type = "Local ROM Only"
+        elif has_igdb_metadata:
+            game_type = "IGDB Metadata Only"
+        else:
+            game_type = "Manual Entry"
+
+        details = f"Title: {game.title}\n\n"
+        details += f"Platform: {game.platform or 'Unknown'}\n\n"
+        details += f"Status: {game.status or 'Unknown'}\n\n"
+        details += f"Type: {game_type}\n\n"
+
+        details += "Local File Info:\n"
+
+        if has_local_rom:
+            details += f"File Name: {game.file_name or 'Unknown'}\n"
+            details += f"ROM Path:\n{game.rom_path}\n\n"
+        else:
+            details += "No local ROM file attached.\n\n"
+
+        details += "IGDB Metadata:\n"
+
+        if has_igdb_metadata:
+            details += f"IGDB ID: {game.igdb_id}\n"
+            details += f"Release Date: {game.release_year or 'Unknown'}\n\n"
+            details += f"Summary:\n{game.summary or 'No summary available.'}\n\n"
+
+            if game.storyline:
+                details += f"Storyline:\n{game.storyline}\n\n"
+
+            if game.cover_url:
+                details += f"Cover URL:\n{game.cover_url}\n"
+        else:
+            details += "Not matched with IGDB yet.\n"
+
+        self.library_details_text.delete("1.0", tk.END)
+        self.library_details_text.insert(tk.END, details)
+
+    def _get_large_cover_url(self, cover_url):
+        if not cover_url:
+            return None
+
+        if "t_cover_big_2x" in cover_url:
+            return cover_url
+
+        if "t_thumb" in cover_url:
+            return cover_url.replace("t_thumb", "t_cover_big_2x")
+
+        if "t_cover_small" in cover_url:
+            return cover_url.replace("t_cover_small", "t_cover_big_2x")
+
+        if "t_cover_big" in cover_url:
+            return cover_url.replace("t_cover_big", "t_cover_big_2x")
+
+        return cover_url
+
+    def _load_cover_art(self, cover_url):
+        if not cover_url:
+            self.cover_frame.pack_forget()
+            self.cover_image = None
+            return
+
+        try:
+            large_cover_url = self._get_large_cover_url(cover_url)
+
+            response = requests.get(large_cover_url, timeout=10)
+            response.raise_for_status()
+
+            image_data = BytesIO(response.content)
+            image = Image.open(image_data)
+
+            image = image.resize((260, 360), Image.LANCZOS)
+
+            self.cover_image = ImageTk.PhotoImage(image)
+
+            self.cover_label.config(
+                image=self.cover_image,
+                text=""
+            )
+
+        except Exception as error:
+            self.cover_label.config(
+                image="",
+                text=f"Cover failed to load\n{error}"
+            )
+            self.cover_image = None
 
     def _delete_selected(self):
         selected_item = self.game_table.selection()
@@ -183,9 +375,28 @@ class App(tk.Tk):
         for row in self.game_table.get_children():
             self.game_table.delete(row)
 
+        if hasattr(self, "library_details_text"):
+            self.library_details_text.delete("1.0", tk.END)
+
+        if hasattr(self, "cover_frame"):
+            self.cover_frame.pack_forget()
+            self.cover_image = None
+
         games = self.game_repository.get_all_games()
 
         for game in games:
+            has_local_rom = bool(game.rom_path)
+            has_igdb_metadata = bool(game.igdb_id)
+
+            if has_local_rom and has_igdb_metadata:
+                game_type = "Local + IGDB"
+            elif has_local_rom:
+                game_type = "Local ROM"
+            elif has_igdb_metadata:
+                game_type = "IGDB"
+            else:
+                game_type = "Manual"
+
             self.game_table.insert(
                 "",
                 "end",
@@ -193,8 +404,8 @@ class App(tk.Tk):
                 values=(
                     game.title,
                     game.platform or "Unknown",
-                    "Unknown",
-                    "Saved"
+                    game_type,
+                    game.status or "Saved"
                 )
             )
 
@@ -208,8 +419,8 @@ class App(tk.Tk):
         messagebox.showinfo(
             "Help",
             "Use the Library tab to view saved games.\n"
-            "Use the Discover IGDB tab to search game metadata.\n"
-            "Use Add Game to manually save a ROM entry later."
+            "Use Add Game to add local .nds files.\n"
+            "Use the Discover IGDB tab to search game metadata."
         )
 
     def _on_close(self):

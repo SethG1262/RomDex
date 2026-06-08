@@ -10,8 +10,7 @@ class GameRepository:
 
     def add_game(self, game_data):
         """
-        Saves a game to the local SQLite database.
-        game_data should be a dictionary from IGDB.
+        Saves a game from IGDB to the local SQLite database.
         """
 
         try:
@@ -33,6 +32,7 @@ class GameRepository:
                 cover_url=self._extract_cover_url(game_data),
                 release_year=self._extract_release_year(game_data),
                 platform=self._extract_platform_name(game_data),
+                status="Saved"
             )
 
             self.session.add(game)
@@ -45,6 +45,52 @@ class GameRepository:
             self.session.rollback()
             raise error
 
+    def add_local_rom(self, rom_path):
+        """
+        Adds a local .nds ROM file to the library.
+        """
+
+        import os
+
+        try:
+            existing_game = self.get_game_by_rom_path(rom_path)
+
+            if existing_game:
+                return existing_game
+
+            file_name = os.path.basename(rom_path)
+            title = os.path.splitext(file_name)[0]
+
+            game = Game(
+                title=title,
+                platform="Nintendo DS",
+                file_name=file_name,
+                rom_path=rom_path,
+                status="Owned"
+            )
+
+            self.session.add(game)
+            self.session.commit()
+            self.session.refresh(game)
+
+            return game
+
+        except SQLAlchemyError as error:
+            self.session.rollback()
+            raise error
+
+    def get_game_by_id(self, game_id):
+        """
+        Finds one game by local database ID.
+        """
+
+        return (
+            self.session
+            .query(Game)
+            .filter(Game.id == game_id)
+            .first()
+        )
+
     def get_game_by_igdb_id(self, igdb_id):
         """
         Finds one game by its IGDB ID.
@@ -54,6 +100,18 @@ class GameRepository:
             self.session
             .query(Game)
             .filter(Game.igdb_id == igdb_id)
+            .first()
+        )
+
+    def get_game_by_rom_path(self, rom_path):
+        """
+        Finds one game by its local ROM file path.
+        """
+
+        return (
+            self.session
+            .query(Game)
+            .filter(Game.rom_path == rom_path)
             .first()
         )
 
@@ -74,18 +132,18 @@ class GameRepository:
         Deletes a saved game by local database ID.
         """
 
-        game = (
-            self.session
-            .query(Game)
-            .filter(Game.id == game_id)
-            .first()
-        )
+        try:
+            game = self.get_game_by_id(game_id)
 
-        if game:
-            self.session.delete(game)
-            self.session.commit()
+            if game:
+                self.session.delete(game)
+                self.session.commit()
 
-        return game
+            return game
+
+        except SQLAlchemyError as error:
+            self.session.rollback()
+            raise error
 
     def close(self):
         """
@@ -105,7 +163,7 @@ class GameRepository:
         if not image_id:
             return None
 
-        return f"https://images.igdb.com/igdb/image/upload/t_cover_big/{image_id}.jpg"
+        return f"https://images.igdb.com/igdb/image/upload/t_cover_big_2x/{image_id}.jpg"
 
     def _extract_release_year(self, game_data):
         release_dates = game_data.get("release_dates")
@@ -130,40 +188,3 @@ class GameRepository:
         first_platform = platforms[0]
 
         return first_platform.get("name")
-
-    def add_local_rom(self, rom_path):
-        """
-        Adds a local .nds ROM file to the library.
-        """
-
-        import os
-
-        existing_game = self.get_game_by_rom_path(rom_path)
-
-        if existing_game:
-            return existing_game
-
-        file_name = os.path.basename(rom_path)
-        title = os.path.splitext(file_name)[0]
-
-        game = Game(
-            title=title,
-            platform="Nintendo DS",
-            file_name=file_name,
-            rom_path=rom_path,
-            status="Owned"
-        )
-
-        self.session.add(game)
-        self.session.commit()
-        self.session.refresh(game)
-
-        return game
-    def get_game_by_rom_path(self, rom_path):
-        return (
-            self.session
-            .query(Game)
-            .filter(Game.rom_path == rom_path)
-            .first()
-        )
-    
