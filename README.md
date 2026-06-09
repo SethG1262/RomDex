@@ -1,4 +1,4 @@
-# Tkinter Starter Project
+# RomDex prototype
 
 A minimal Tkinter application to get started with Python GUI development.
 
