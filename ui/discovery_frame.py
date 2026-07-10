@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 from services.igdb_service import IGDBService
+from services.discovery_filter_service import DiscoveryFilterService
 from repositories.game_repository import GameRepository
 
 
@@ -11,7 +12,12 @@ class DiscoveryFrame(ttk.Frame):
 
         self.igdb_service = IGDBService()
         self.game_repository = GameRepository()
+        self.discovery_filter_service = DiscoveryFilterService()
 
+        # Full unfiltered results for the current IGDB page
+        self.page_results = []
+
+        # Filtered results currently displayed in the table
         self.results = []
 
         self.page_size = 50
@@ -35,6 +41,10 @@ class DiscoveryFrame(ttk.Frame):
 
         self.search_entry = ttk.Entry(search_frame, width=45)
         self.search_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
+        self.search_entry.bind(
+            "<Return>",
+            lambda event: self._start_search()
+        )
 
         search_button = ttk.Button(
             search_frame,
@@ -49,6 +59,159 @@ class DiscoveryFrame(ttk.Frame):
             command=self._start_browse
         )
         browse_button.pack(side="left", padx=5)
+
+        # Advanced filters for the current IGDB result page
+        filter_frame = ttk.LabelFrame(
+            self,
+            text="Discovery Filters",
+            padding=10
+        )
+        filter_frame.pack(fill="x", padx=10, pady=(0, 10))
+
+        first_filter_row = ttk.Frame(filter_frame)
+        first_filter_row.pack(fill="x", pady=(0, 6))
+
+        ttk.Label(
+            first_filter_row,
+            text="Filter title:"
+        ).pack(side="left")
+
+        self.filter_title_entry = ttk.Entry(
+            first_filter_row,
+            width=24
+        )
+        self.filter_title_entry.pack(
+            side="left",
+            padx=(5, 12)
+        )
+        self.filter_title_entry.bind(
+            "<Return>",
+            lambda event: self._apply_discovery_filters()
+        )
+
+        ttk.Label(
+            first_filter_row,
+            text="Platform:"
+        ).pack(side="left")
+
+        self.platform_filter = ttk.Combobox(
+            first_filter_row,
+            state="readonly",
+            width=18,
+            values=["All Platforms"]
+        )
+        self.platform_filter.set("All Platforms")
+        self.platform_filter.pack(
+            side="left",
+            padx=(5, 12)
+        )
+
+        ttk.Label(
+            first_filter_row,
+            text="Year:"
+        ).pack(side="left")
+
+        self.year_filter = ttk.Combobox(
+            first_filter_row,
+            state="readonly",
+            width=11,
+            values=["All Years"]
+        )
+        self.year_filter.set("All Years")
+        self.year_filter.pack(
+            side="left",
+            padx=(5, 12)
+        )
+
+        second_filter_row = ttk.Frame(filter_frame)
+        second_filter_row.pack(fill="x")
+
+        ttk.Label(
+            second_filter_row,
+            text="Genre:"
+        ).pack(side="left")
+
+        self.genre_filter = ttk.Combobox(
+            second_filter_row,
+            state="readonly",
+            width=18,
+            values=["All Genres"]
+        )
+        self.genre_filter.set("All Genres")
+        self.genre_filter.pack(
+            side="left",
+            padx=(5, 12)
+        )
+
+        ttk.Label(
+            second_filter_row,
+            text="Cover:"
+        ).pack(side="left")
+
+        self.cover_filter = ttk.Combobox(
+            second_filter_row,
+            state="readonly",
+            width=12,
+            values=[
+                "All Games",
+                "Has Cover",
+                "No Cover"
+            ]
+        )
+        self.cover_filter.set("All Games")
+        self.cover_filter.pack(
+            side="left",
+            padx=(5, 12)
+        )
+
+        ttk.Label(
+            second_filter_row,
+            text="Sort:"
+        ).pack(side="left")
+
+        self.sort_filter = ttk.Combobox(
+            second_filter_row,
+            state="readonly",
+            width=20,
+            values=[
+                "Title A-Z",
+                "Title Z-A",
+                "Release Year Newest",
+                "Release Year Oldest"
+            ]
+        )
+        self.sort_filter.set("Title A-Z")
+        self.sort_filter.pack(
+            side="left",
+            padx=(5, 12)
+        )
+
+        apply_filter_button = ttk.Button(
+            second_filter_row,
+            text="Apply Filters",
+            command=self._apply_discovery_filters
+        )
+        apply_filter_button.pack(side="left", padx=5)
+
+        reset_filter_button = ttk.Button(
+            second_filter_row,
+            text="Reset Filters",
+            command=self._reset_discovery_filters
+        )
+        reset_filter_button.pack(side="left", padx=5)
+
+        # Automatically update results when a dropdown changes
+        for combobox in (
+            self.platform_filter,
+            self.year_filter,
+            self.genre_filter,
+            self.cover_filter,
+            self.sort_filter
+        ):
+            combobox.bind(
+                "<<ComboboxSelected>>",
+                lambda event: self._apply_discovery_filters()
+            )
 
         page_frame = ttk.Frame(self, padding=(10, 0))
         page_frame.pack(fill="x")
@@ -188,7 +351,11 @@ class DiscoveryFrame(ttk.Frame):
             else:
                 games = []
 
-            self._display_results(games)
+            # Preserve the original page before applying local filters
+            self.page_results = games
+
+            self._refresh_discovery_filter_options()
+            self._reset_discovery_filters()
 
         except Exception as error:
             messagebox.showerror("IGDB Error", str(error))
@@ -202,7 +369,57 @@ class DiscoveryFrame(ttk.Frame):
 
         self.status_label.config(text="Loading...")
 
-    def _display_results(self, games):
+    def _apply_discovery_filters(self):
+        filtered_games = self.discovery_filter_service.filter_games(
+            games=self.page_results,
+            title=self.filter_title_entry.get(),
+            platform=self.platform_filter.get(),
+            release_year=self.year_filter.get(),
+            genre=self.genre_filter.get(),
+            cover_option=self.cover_filter.get(),
+            sort_option=self.sort_filter.get()
+        )
+
+        self._display_results(filtered_games, filtered=True)
+
+    def _reset_discovery_filters(self):
+        self.filter_title_entry.delete(0, tk.END)
+
+        self.platform_filter.set("All Platforms")
+        self.year_filter.set("All Years")
+        self.genre_filter.set("All Genres")
+        self.cover_filter.set("All Games")
+        self.sort_filter.set("Title A-Z")
+
+        default_results = self.discovery_filter_service.filter_games(
+            games=self.page_results,
+            sort_option="Title A-Z"
+        )
+
+        self._display_results(default_results, filtered=False)
+
+    def _refresh_discovery_filter_options(self):
+        platform_options = (
+            self.discovery_filter_service.get_platform_options(
+                self.page_results
+            )
+        )
+        year_options = (
+            self.discovery_filter_service.get_year_options(
+                self.page_results
+            )
+        )
+        genre_options = (
+            self.discovery_filter_service.get_genre_options(
+                self.page_results
+            )
+        )
+
+        self.platform_filter["values"] = platform_options
+        self.year_filter["values"] = year_options
+        self.genre_filter["values"] = genre_options
+
+    def _display_results(self, games, filtered=False):
         self.results = games
 
         for row in self.results_table.get_children():
@@ -210,20 +427,36 @@ class DiscoveryFrame(ttk.Frame):
 
         self.details_text.delete("1.0", tk.END)
 
+        self.page_label.config(text=f"Page: {self.current_page}")
+
         if not games:
-            self.status_label.config(
-                text=f"No results on page {self.current_page}."
-            )
-            self.details_text.insert(
-                tk.END,
-                "No games found on this page."
-            )
+            if filtered and self.page_results:
+                self.status_label.config(
+                    text=(
+                        f"No games match the selected filters on "
+                        f"page {self.current_page}."
+                    )
+                )
+                self.details_text.insert(
+                    tk.END,
+                    "No games match the selected filters."
+                )
+            else:
+                self.status_label.config(
+                    text=f"No results on page {self.current_page}."
+                )
+                self.details_text.insert(
+                    tk.END,
+                    "No games found on this page."
+                )
             return
 
         for index, game in enumerate(games):
             title = game.get("name", "Unknown Title")
-            platform = self._get_platform_text(game)
-            release_date = self._get_release_date_text(game)
+            platform = self.discovery_filter_service.get_platform_text(game)
+            release_date = (
+                self.discovery_filter_service.get_release_date_text(game)
+            )
 
             self.results_table.insert(
                 "",
@@ -232,15 +465,26 @@ class DiscoveryFrame(ttk.Frame):
                 values=(title, platform, release_date)
             )
 
-        self.page_label.config(text=f"Page: {self.current_page}")
-
-        if self.current_mode == "search":
+        if filtered:
             self.status_label.config(
-                text=f'Searching "{self.current_search_term}" — {len(games)} result(s) on this page.'
+                text=(
+                    f"Showing {len(games)} of {len(self.page_results)} "
+                    f"game(s) on page {self.current_page}."
+                )
+            )
+        elif self.current_mode == "search":
+            self.status_label.config(
+                text=(
+                    f'Searching "{self.current_search_term}" — '
+                    f'{len(games)} result(s) on this page.'
+                )
             )
         else:
             self.status_label.config(
-                text=f"Browsing games — {len(games)} result(s) on this page."
+                text=(
+                    f"Browsing games — {len(games)} "
+                    f"result(s) on this page."
+                )
             )
 
         self.details_text.insert(
@@ -256,9 +500,11 @@ class DiscoveryFrame(ttk.Frame):
             return
 
         title = selected_game.get("name", "Unknown Title")
-        platform = self._get_platform_text(selected_game)
-        release_date = self._get_release_date_text(selected_game)
-        genres = self._get_genre_text(selected_game)
+        platform = self.discovery_filter_service.get_platform_text(selected_game)
+        release_date = (
+            self.discovery_filter_service.get_release_date_text(selected_game)
+        )
+        genres = self.discovery_filter_service.get_genre_text(selected_game)
         summary = selected_game.get("summary", "No summary available.")
         storyline = selected_game.get("storyline", "")
 
@@ -304,48 +550,6 @@ class DiscoveryFrame(ttk.Frame):
             return None
 
         return self.results[selected_index]
-
-    def _get_platform_text(self, game):
-        platforms = game.get("platforms")
-
-        if not platforms:
-            return "Unknown"
-
-        platform_names = []
-
-        for platform in platforms:
-            name = platform.get("name")
-
-            if name:
-                platform_names.append(name)
-
-        return ", ".join(platform_names)
-
-    def _get_release_date_text(self, game):
-        release_dates = game.get("release_dates")
-
-        if not release_dates:
-            return "Unknown"
-
-        first_release = release_dates[0]
-
-        return first_release.get("human", "Unknown")
-
-    def _get_genre_text(self, game):
-        genres = game.get("genres")
-
-        if not genres:
-            return "Unknown"
-
-        genre_names = []
-
-        for genre in genres:
-            name = genre.get("name")
-
-            if name:
-                genre_names.append(name)
-
-        return ", ".join(genre_names)
 
     def close(self):
         self.game_repository.close()

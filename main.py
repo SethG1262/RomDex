@@ -5,7 +5,7 @@ from io import BytesIO
 from PIL import Image, ImageTk
 
 from services.db import init_db
-import models.game
+from services.library_filter_service import LibraryFilterService
 
 from repositories.game_repository import GameRepository
 from ui.discovery_frame import DiscoveryFrame
@@ -19,11 +19,14 @@ class App(tk.Tk):
 
         # Basic window settings
         self.title("RomDex")
-        self.geometry("1100x700")
-        self.minsize(950, 600)
+        self.geometry("1150x750")
+        self.minsize(1000, 650)
 
         # Repository handles database actions for saved games
         self.game_repository = GameRepository()
+
+        # Service handles library searching, filtering, and sorting
+        self.library_filter_service = LibraryFilterService()
 
         # Keeps a reference to the cover image so Tkinter does not garbage collect it
         self.cover_image = None
@@ -69,13 +72,28 @@ class App(tk.Tk):
         self.search_entry = tk.Entry(top_frame, width=40)
         self.search_entry.pack(side="left", fill="x", expand=True)
         self.search_entry.insert(0, "Search games...")
+        self.search_entry.bind(
+            "<Return>",
+            lambda event: self._apply_filters()
+        )
+        self.search_entry.bind(
+            "<FocusIn>",
+            self._clear_search_placeholder
+        )
 
         search_button = tk.Button(
             top_frame,
-            text="Search",
-            command=self._search_games
+            text="Apply Filters",
+            command=self._apply_filters
         )
         search_button.pack(side="left", padx=5)
+
+        reset_button = tk.Button(
+            top_frame,
+            text="Reset Filters",
+            command=self._reset_filters
+        )
+        reset_button.pack(side="left", padx=5)
 
         add_button = tk.Button(
             top_frame,
@@ -90,6 +108,87 @@ class App(tk.Tk):
             command=self._discover_games
         )
         discover_button.pack(side="left", padx=5)
+
+        # Advanced filter controls
+        filter_frame = ttk.LabelFrame(
+            self.library_tab,
+            text="Advanced Filters",
+            padding=10
+        )
+        filter_frame.pack(fill="x", padx=20, pady=(10, 0))
+
+        ttk.Label(filter_frame, text="Platform:").pack(side="left")
+
+        self.platform_filter = ttk.Combobox(
+            filter_frame,
+            state="readonly",
+            width=18,
+            values=["All Platforms"]
+        )
+        self.platform_filter.set("All Platforms")
+        self.platform_filter.pack(side="left", padx=(5, 15))
+
+        ttk.Label(filter_frame, text="Type:").pack(side="left")
+
+        self.type_filter = ttk.Combobox(
+            filter_frame,
+            state="readonly",
+            width=15,
+            values=[
+                "All Types",
+                "Local ROM",
+                "IGDB",
+                "Local + IGDB",
+                "Manual"
+            ]
+        )
+        self.type_filter.set("All Types")
+        self.type_filter.pack(side="left", padx=(5, 15))
+
+        ttk.Label(filter_frame, text="Status:").pack(side="left")
+
+        self.status_filter = ttk.Combobox(
+            filter_frame,
+            state="readonly",
+            width=15,
+            values=["All Statuses"]
+        )
+        self.status_filter.set("All Statuses")
+        self.status_filter.pack(side="left", padx=(5, 15))
+
+        ttk.Label(filter_frame, text="Sort:").pack(side="left")
+
+        self.sort_filter = ttk.Combobox(
+            filter_frame,
+            state="readonly",
+            width=15,
+            values=[
+                "Title A-Z",
+                "Title Z-A",
+                "Newest Added",
+                "Oldest Added"
+            ]
+        )
+        self.sort_filter.set("Title A-Z")
+        self.sort_filter.pack(side="left", padx=5)
+
+        # Automatically apply filters when a dropdown changes
+        self.platform_filter.bind(
+            "<<ComboboxSelected>>",
+            lambda event: self._apply_filters()
+        )
+        self.type_filter.bind(
+            "<<ComboboxSelected>>",
+            lambda event: self._apply_filters()
+        )
+        self.status_filter.bind(
+            "<<ComboboxSelected>>",
+            lambda event: self._apply_filters()
+        )
+        self.sort_filter.bind(
+            "<<ComboboxSelected>>",
+            lambda event: self._apply_filters()
+        )
 
         # Main content area with the game table on the left and details on the right
         content_frame = tk.Frame(self.library_tab)
@@ -205,17 +304,60 @@ class App(tk.Tk):
 
         self.config(menu=menu_bar)
 
-    def _search_games(self):
-        # Gets the search text from the input box
+    def _clear_search_placeholder(self, event):
+        if self.search_entry.get() == "Search games...":
+            self.search_entry.delete(0, tk.END)
+
+    def _apply_filters(self):
+        # Gets the current filter values from the interface
         search_text = self.search_entry.get().strip()
 
-        # Prevents empty searches or searches using the placeholder text
-        if not search_text or search_text == "Search games...":
-            messagebox.showinfo("Search", "Enter a game title to search.")
-            return
+        if search_text == "Search games...":
+            search_text = ""
 
-        # Placeholder for future search functionality
-        messagebox.showinfo("Search", f"Searching for: {search_text}")
+        games = self.game_repository.get_all_games()
+
+        filtered_games = self.library_filter_service.filter_games(
+            games=games,
+            search_text=search_text,
+            platform=self.platform_filter.get(),
+            game_type=self.type_filter.get(),
+            status=self.status_filter.get(),
+            sort_option=self.sort_filter.get()
+        )
+
+        self._display_library_games(filtered_games)
+
+    def _reset_filters(self):
+        self.search_entry.delete(0, tk.END)
+        self.search_entry.insert(0, "Search games...")
+
+        self.platform_filter.set("All Platforms")
+        self.type_filter.set("All Types")
+        self.status_filter.set("All Statuses")
+        self.sort_filter.set("Title A-Z")
+
+        self._load_library_games()
+
+    def _refresh_filter_options(self, games):
+        platform_options = (
+            self.library_filter_service.get_platform_options(games)
+        )
+        status_options = (
+            self.library_filter_service.get_status_options(games)
+        )
+
+        current_platform = self.platform_filter.get()
+        current_status = self.status_filter.get()
+
+        self.platform_filter["values"] = platform_options
+        self.status_filter["values"] = status_options
+
+        if current_platform not in platform_options:
+            self.platform_filter.set("All Platforms")
+
+        if current_status not in status_options:
+            self.status_filter.set("All Statuses")
 
     def _add_game(self):
         # Opens a file picker so the user can select one or more .nds files
@@ -432,7 +574,7 @@ class App(tk.Tk):
         except Exception as error:
             messagebox.showerror("Delete Error", str(error))
 
-    def _load_library_games(self):
+    def _display_library_games(self, games):
         # Clears all current rows from the table
         for row in self.game_table.get_children():
             self.game_table.delete(row)
@@ -446,23 +588,8 @@ class App(tk.Tk):
             self.cover_frame.pack_forget()
             self.cover_image = None
 
-        # Gets all games from the database
-        games = self.game_repository.get_all_games()
-
         for game in games:
-            # Checks what data each saved game has
-            has_local_rom = bool(game.rom_path)
-            has_igdb_metadata = bool(game.igdb_id)
-
-            # Determines the display type shown in the table
-            if has_local_rom and has_igdb_metadata:
-                game_type = "Local + IGDB"
-            elif has_local_rom:
-                game_type = "Local ROM"
-            elif has_igdb_metadata:
-                game_type = "IGDB"
-            else:
-                game_type = "Manual"
+            game_type = self.library_filter_service.get_game_type(game)
 
             # Adds the game as a row in the table
             self.game_table.insert(
@@ -477,6 +604,20 @@ class App(tk.Tk):
                 )
             )
 
+    def _load_library_games(self):
+        # Gets all games from the database
+        games = self.game_repository.get_all_games()
+
+        # Updates dropdown options from actual saved data
+        self._refresh_filter_options(games)
+
+        # Displays the full library using the default sort
+        filtered_games = self.library_filter_service.filter_games(
+            games=games,
+            sort_option="Title A-Z"
+        )
+        self._display_library_games(filtered_games)
+
     def _show_about(self):
         # Shows basic app information
         messagebox.showinfo(
@@ -490,6 +631,7 @@ class App(tk.Tk):
             "Help",
             "Use the Library tab to view saved games.\n"
             "Use Add Game to add local .nds files.\n"
+            "Use the advanced filters to narrow and sort the library.\n"
             "Use the Discover IGDB tab to search game metadata."
         )
 
