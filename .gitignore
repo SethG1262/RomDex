@@ -1,0 +1,4 @@
+.env
+data/romdex.db
+data/firebase_auth_session.json
+data/cloud_library_config.json
