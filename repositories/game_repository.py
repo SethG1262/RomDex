@@ -15,23 +15,17 @@ class GameRepository:
         """
         Saves a game from IGDB to the local SQLite database.
         """
-
         try:
-            # Gets the IGDB ID from the API game data.
-            # This is used to prevent saving duplicate IGDB games.
             igdb_id = game_data.get("id")
 
             if igdb_id is None:
                 raise ValueError("Game data is missing IGDB ID.")
 
-            # Checks if the game already exists in the database.
             existing_game = self.get_game_by_igdb_id(igdb_id)
 
-            # If the game already exists, return it instead of creating a duplicate.
             if existing_game:
                 return existing_game
 
-            # Creates a new Game model object using data from IGDB.
             game = Game(
                 igdb_id=igdb_id,
                 title=game_data.get("name", "Unknown Title"),
@@ -43,19 +37,13 @@ class GameRepository:
                 status="Saved"
             )
 
-            # Adds the new game to the database session.
             self.session.add(game)
-
-            # Saves the changes permanently to the database.
             self.session.commit()
-
-            # Refreshes the object so it includes generated database values like id.
             self.session.refresh(game)
 
             return game
 
         except SQLAlchemyError as error:
-            # Rolls back the transaction if a database error happens.
             self.session.rollback()
             raise error
 
@@ -63,24 +51,17 @@ class GameRepository:
         """
         Adds a local .nds ROM file to the library.
         """
-
         import os
 
         try:
-            # Checks if this ROM path already exists in the database.
             existing_game = self.get_game_by_rom_path(rom_path)
 
-            # Prevents duplicate ROM file entries.
             if existing_game:
                 return existing_game
 
-            # Gets the file name from the full file path.
             file_name = os.path.basename(rom_path)
-
-            # Uses the file name without extension as the game title.
             title = os.path.splitext(file_name)[0]
 
-            # Creates a Game object for a local ROM file.
             game = Game(
                 title=title,
                 platform="Nintendo DS",
@@ -89,7 +70,6 @@ class GameRepository:
                 status="Owned"
             )
 
-            # Adds and saves the local ROM entry.
             self.session.add(game)
             self.session.commit()
             self.session.refresh(game)
@@ -97,16 +77,75 @@ class GameRepository:
             return game
 
         except SQLAlchemyError as error:
-            # Undo database changes if the insert fails.
             self.session.rollback()
             raise error
 
-    def get_game_by_id(self, game_id):
+    def import_cloud_game(self, cloud_game):
         """
-        Finds one game by local database ID.
-        """
+        Imports one cloud-safe game record into the local SQLite library.
 
-        # Queries the Game table for the first game matching the local database id.
+        The method deliberately leaves file_name and rom_path empty.
+        """
+        igdb_id = cloud_game.get("igdb_id")
+        title = (cloud_game.get("title") or "Unknown Title").strip()
+        platform = cloud_game.get("platform") or "Unknown"
+
+        if igdb_id is not None:
+            existing_game = self.get_game_by_igdb_id(igdb_id)
+        else:
+            existing_game = self.get_game_by_title_and_platform(
+                title,
+                platform
+            )
+
+        if existing_game:
+            return existing_game, False
+
+        try:
+            game = Game(
+                igdb_id=igdb_id,
+                title=title,
+                summary=cloud_game.get("summary"),
+                storyline=cloud_game.get("storyline"),
+                cover_url=cloud_game.get("cover_url"),
+                release_year=cloud_game.get("release_year"),
+                platform=platform,
+                status=cloud_game.get("status") or "Saved",
+                file_name=None,
+                rom_path=None
+            )
+
+            self.session.add(game)
+            self.session.commit()
+            self.session.refresh(game)
+
+            return game, True
+
+        except SQLAlchemyError as error:
+            self.session.rollback()
+            raise error
+
+    def import_cloud_games(self, cloud_games):
+        """
+        Imports multiple cloud game records and skips local duplicates.
+        """
+        imported_count = 0
+        skipped_count = 0
+
+        for cloud_game in cloud_games:
+            _, was_imported = self.import_cloud_game(cloud_game)
+
+            if was_imported:
+                imported_count += 1
+            else:
+                skipped_count += 1
+
+        return {
+            "imported_count": imported_count,
+            "skipped_count": skipped_count
+        }
+
+    def get_game_by_id(self, game_id):
         return (
             self.session
             .query(Game)
@@ -115,11 +154,6 @@ class GameRepository:
         )
 
     def get_game_by_igdb_id(self, igdb_id):
-        """
-        Finds one game by its IGDB ID.
-        """
-
-        # Queries the Game table for the first game matching the IGDB id.
         return (
             self.session
             .query(Game)
@@ -128,11 +162,6 @@ class GameRepository:
         )
 
     def get_game_by_rom_path(self, rom_path):
-        """
-        Finds one game by its local ROM file path.
-        """
-
-        # Queries the Game table for the first game with the same ROM file path.
         return (
             self.session
             .query(Game)
@@ -140,12 +169,21 @@ class GameRepository:
             .first()
         )
 
-    def get_all_games(self):
+    def get_game_by_title_and_platform(self, title, platform):
         """
-        Returns all saved games from the local database.
+        Finds a local game using a case-insensitive title and platform match.
         """
+        return (
+            self.session
+            .query(Game)
+            .filter(
+                Game.title.ilike(title),
+                Game.platform.ilike(platform)
+            )
+            .first()
+        )
 
-        # Returns all games ordered alphabetically by title.
+    def get_all_games(self):
         return (
             self.session
             .query(Game)
@@ -154,15 +192,9 @@ class GameRepository:
         )
 
     def delete_game(self, game_id):
-        """
-        Deletes a saved game by local database ID.
-        """
-
         try:
-            # Finds the game before trying to delete it.
             game = self.get_game_by_id(game_id)
 
-            # Only delete if the game exists.
             if game:
                 self.session.delete(game)
                 self.session.commit()
@@ -170,58 +202,42 @@ class GameRepository:
             return game
 
         except SQLAlchemyError as error:
-            # Roll back if the delete operation fails.
             self.session.rollback()
             raise error
 
     def close(self):
-        """
-        Closes the database session.
-        """
-
-        # Closes the session when the repository is no longer needed.
         self.session.close()
 
     def _extract_cover_url(self, game_data):
-        # Gets cover information from the IGDB game data.
         cover = game_data.get("cover")
 
         if not cover:
             return None
 
-        # Gets IGDB's image id for the cover art.
         image_id = cover.get("image_id")
 
         if not image_id:
             return None
 
-        # Builds a full IGDB cover image URL from the image id.
-        return f"https://images.igdb.com/igdb/image/upload/t_cover_big_2x/{image_id}.jpg"
+        return (
+            "https://images.igdb.com/igdb/image/upload/"
+            f"t_cover_big_2x/{image_id}.jpg"
+        )
 
     def _extract_release_year(self, game_data):
-        # Gets release date data from the IGDB game data.
         release_dates = game_data.get("release_dates")
 
         if not release_dates:
             return None
 
-        # Uses the first release date listed by IGDB.
         first_date = release_dates[0]
-        human_date = first_date.get("human")
-
-        if not human_date:
-            return None
-
-        return human_date
+        return first_date.get("human")
 
     def _extract_platform_name(self, game_data):
-        # Gets platform data from the IGDB game data.
         platforms = game_data.get("platforms")
 
         if not platforms:
             return None
 
-        # Uses the first platform listed by IGDB.
         first_platform = platforms[0]
-
         return first_platform.get("name")
