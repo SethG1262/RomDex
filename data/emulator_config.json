@@ -1,0 +1,8 @@
+{
+  "emulators": {
+    "nintendo_ds": {
+      "name": "melonDS",
+      "executable_path": "C:\\Users\\contr\\OneDrive\\Desktop\\dsi\\melonDS.exe"
+    }
+  }
+}
