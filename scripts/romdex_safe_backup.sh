@@ -1,18 +1,3 @@
-#!/usr/bin/env bash
-
-# ============================================================
-# RomDex Safe Source Backup
-# ============================================================
-# Purpose:
-# Creates a compressed backup of the RomDex source code while
-# excluding secrets, databases, ROMs, save files, caches, and
-# other device-specific runtime files.
-#
-# Run from the RomDex project root with:
-# bash scripts/romdex_safe_backup.sh
-# ============================================================
-
-
 # Exit immediately when:
 # - a command fails (-e)
 # - an undefined variable is used (-u)
