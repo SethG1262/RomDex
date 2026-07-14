@@ -5,3 +5,4 @@ data/cloud_library_config.json
 data/emulator_config.json
 /tests/
 /reports/
+/backups/
