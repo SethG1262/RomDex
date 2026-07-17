@@ -66,11 +66,25 @@ class LibraryFrame(ttk.Frame):
         self.refresh_library()
 
     def _create_widgets(self):
+        """
+        Builds a responsive Library page.
+
+        Grid is used instead of packing the expanding content before
+        the action bar. This guarantees that the action bar keeps its
+        own visible bottom row when the window becomes shorter.
+        """
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(3, weight=1)
+
         ttk.Label(
             self,
             text="DS ROM Library",
-            font=("Arial", 22, "bold"),
-        ).pack(pady=15)
+            font=("Segoe UI", 22, "bold"),
+        ).grid(
+            row=0,
+            column=0,
+            pady=(15, 8),
+        )
 
         self.toolbar = LibraryToolbar(
             self,
@@ -80,36 +94,52 @@ class LibraryFrame(ttk.Frame):
             on_add_game=self.add_game,
             on_discover=self._open_discovery,
         )
-        self.toolbar.pack(fill="x", padx=20)
+        self.toolbar.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=20,
+        )
 
         self.filter_bar = LibraryFilterBar(
             self,
             on_filters_changed=self.apply_filters,
         )
-        self.filter_bar.pack(fill="x", padx=20, pady=(10, 0))
+        self.filter_bar.grid(
+            row=2,
+            column=0,
+            sticky="ew",
+            padx=20,
+            pady=(10, 0),
+        )
 
         content_frame = ttk.Frame(self)
-        content_frame.pack(
-            fill="both",
-            expand=True,
+        content_frame.grid(
+            row=3,
+            column=0,
+            sticky="nsew",
             padx=20,
-            pady=20,
+            pady=(14, 10),
         )
+        content_frame.columnconfigure(0, weight=3)
+        content_frame.columnconfigure(1, weight=1)
+        content_frame.rowconfigure(0, weight=1)
 
         self.library_table = LibraryTable(
             content_frame,
             on_game_selected=self._on_game_selected,
         )
-        self.library_table.pack(
-            side="left",
-            fill="both",
-            expand=True,
+        self.library_table.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
         )
 
         self.details_panel = GameDetailsPanel(content_frame)
-        self.details_panel.pack(
-            side="right",
-            fill="both",
+        self.details_panel.grid(
+            row=0,
+            column=1,
+            sticky="nsew",
             padx=(15, 0),
         )
 
@@ -124,7 +154,13 @@ class LibraryFrame(ttk.Frame):
             on_refresh=self.refresh_library,
             on_quit=self._quit,
         )
-        self.action_bar.pack(fill="x", padx=20, pady=10)
+        self.action_bar.grid(
+            row=4,
+            column=0,
+            sticky="ew",
+            padx=20,
+            pady=(0, 12),
+        )
 
     def apply_filters(self):
         games = self.game_repository.get_all_games()
