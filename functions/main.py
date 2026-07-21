@@ -21,7 +21,7 @@ IGDB_CLIENT_ID = SecretParam("IGDB_CLIENT_ID")
 IGDB_CLIENT_SECRET = SecretParam("IGDB_CLIENT_SECRET")
 
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
-IGDB_API_ROOT = "https://api.igdb.com/v4"
+IGDB_API_ROOT = "https://api.igdb.com/v4"   
 DS_FAMILY_PLATFORM_IDS = (20, 37, 159)
 
 GAME_FIELDS = (
