@@ -33,9 +33,13 @@ class CloudLibraryService:
         "projects/{project_id}/databases/(default)/documents"
     )
 
+    SYNC_MODE_SNAPSHOT = "snapshot"
+    # Kept as aliases so older callers do not fail during an upgrade. Cloud
+    # synchronization now always stores one exact local metadata snapshot.
     SYNC_MODE_ADDITIVE = "additive"
     SYNC_MODE_MIRROR = "mirror"
     SYNC_MODES = {
+        SYNC_MODE_SNAPSHOT,
         SYNC_MODE_ADDITIVE,
         SYNC_MODE_MIRROR
     }
@@ -91,17 +95,17 @@ class CloudLibraryService:
         self,
         games,
         library_name="My RomDex Library",
-        mode=SYNC_MODE_ADDITIVE
+        mode=SYNC_MODE_SNAPSHOT
     ):
         """
         Creates or reuses this installation's cloud library, then
-        synchronizes the current local games.
+        stores the current local games as the cloud metadata snapshot.
 
         On the first sync, a new Firestore library is created and its IDs
         are saved locally. Later syncs reuse the saved library ID so
-        duplicate cloud libraries are not created. Additive mode retains
-        cloud-only games. Mirror mode deletes cloud-only games so Firestore
-        exactly matches the local metadata library.
+        duplicate cloud libraries are not created. Cloud metadata absent from
+        this installation is removed so Firestore represents one unambiguous
+        version of the connected library. ROM files are never uploaded.
         """
         self._validate_sync_mode(mode)
 
@@ -115,15 +119,22 @@ class CloudLibraryService:
         if config:
             library_id = config["library_id"]
 
-            # Confirm the remembered cloud library still exists and belongs
-            # to this anonymous Firebase installation.
             library = self.get_library(library_id)
 
             if library.get("owner_uid") != self.auth_service.uid:
                 raise CloudLibraryError(
-                    "The saved cloud library is not owned by this "
-                    "Firebase installation."
+                    "The saved cloud library belongs to a different "
+                    "RomDex installation."
                 )
+
+            self._remove_legacy_access_fields(library)
+
+            # Re-save old local configs without obsolete private/link fields.
+            self.config_service.save_config(
+                library_id=library_id,
+                share_id=library["share_id"],
+                library_name=library.get("name", library_name)
+            )
 
         else:
             library = self.create_library(
@@ -135,9 +146,6 @@ class CloudLibraryService:
                 self.config_service.save_config(
                     library_id=library["library_id"],
                     share_id=library["share_id"],
-                    private_sync_key=(
-                        library["private_sync_key"]
-                    ),
                     library_name=library["name"]
                 )
             except CloudConfigError as error:
@@ -147,8 +155,7 @@ class CloudLibraryService:
 
         upload_result = self.upload_library_games(
             library_id=library_id,
-            games=games,
-            mode=mode
+            games=games
         )
 
         active_config = self.config_service.load_config()
@@ -167,7 +174,7 @@ class CloudLibraryService:
             "retained_count": upload_result["retained_count"],
             "duplicate_count": upload_result["duplicate_count"],
             "cloud_game_count": upload_result["cloud_game_count"],
-            "mode": mode,
+            "mode": self.SYNC_MODE_SNAPSHOT,
             "created_new_library": (
                 created_new_library
             )
@@ -181,14 +188,12 @@ class CloudLibraryService:
 
         library_id = self.key_service.generate_library_id()
         share_id = self.key_service.generate_share_key()
-        private_sync_key = self.key_service.generate_private_sync_key()
         now = self._utc_now()
 
         library_data = {
             "library_id": library_id,
             "owner_uid": self.auth_service.uid,
             "share_id": share_id,
-            "private_sync_key": private_sync_key,
             "name": name.strip() or "My RomDex Library",
             "created_at": now,
             "updated_at": now,
@@ -242,14 +247,14 @@ class CloudLibraryService:
         self,
         library_id,
         games,
-        mode=SYNC_MODE_ADDITIVE
+        mode=SYNC_MODE_SNAPSHOT
     ):
         """
         Synchronizes local Game objects with the Firestore subcollection.
 
         Existing documents with the same stable cloud IDs are updated rather
-        than duplicated. Mirror mode also deletes cloud documents that no
-        longer exist locally. ROM paths and local file names are never sent.
+        than duplicated. Cloud documents that no longer exist locally are
+        removed. ROM paths and local file names are never sent.
         """
         self._validate_sync_mode(mode)
 
@@ -257,7 +262,7 @@ class CloudLibraryService:
 
         if library.get("owner_uid") != self.auth_service.uid:
             raise CloudLibraryError(
-                "This Firebase installation does not own that cloud library."
+                "This installation does not own that cloud library."
             )
 
         existing_documents = self._list_library_game_documents(
@@ -298,19 +303,15 @@ class CloudLibraryService:
         cloud_only_ids = existing_ids - local_ids
         deleted_count = 0
 
-        if mode == self.SYNC_MODE_MIRROR:
-            for cloud_game_id in sorted(cloud_only_ids):
-                self._delete_game_document(
-                    library_id=library_id,
-                    game_id=cloud_game_id
-                )
-                deleted_count += 1
+        for cloud_game_id in sorted(cloud_only_ids):
+            self._delete_game_document(
+                library_id=library_id,
+                game_id=cloud_game_id
+            )
+            deleted_count += 1
 
-            final_ids = local_ids
-            retained_count = 0
-        else:
-            final_ids = existing_ids | local_ids
-            retained_count = len(cloud_only_ids)
+        final_ids = local_ids
+        retained_count = 0
 
         self._update_library_summary(
             library_id=library_id,
@@ -324,7 +325,7 @@ class CloudLibraryService:
             "retained_count": retained_count,
             "duplicate_count": duplicate_count,
             "cloud_game_count": len(final_ids),
-            "mode": mode
+            "mode": self.SYNC_MODE_SNAPSHOT
         }
 
     def get_library_games(self, library_id):
@@ -461,6 +462,45 @@ class CloudLibraryService:
         except requests.RequestException as error:
             raise CloudLibraryError(
                 f"Could not update the library summary: {error}"
+            ) from error
+
+        self._raise_for_firestore_error(response)
+
+    def _remove_legacy_access_fields(self, library):
+        """Removes obsolete private/link fields without clearing the library."""
+        legacy_fields = (
+            "private_sync_key",
+            "link_key_hash",
+            "writer_uids"
+        )
+        fields_to_remove = [
+            field
+            for field in legacy_fields
+            if field in library
+        ]
+        if not fields_to_remove:
+            return
+
+        library_id = library["library_id"]
+        url = f"{self.documents_url}/libraries/{library_id}"
+        params = [
+            ("updateMask.fieldPaths", field)
+            for field in fields_to_remove
+        ]
+
+        try:
+            response = requests.patch(
+                url,
+                params=params,
+                headers=self.auth_service.get_auth_headers(),
+                # An update-mask path omitted from fields is deleted.
+                json={"fields": {}},
+                timeout=20
+            )
+        except requests.RequestException as error:
+            raise CloudLibraryError(
+                "Could not remove obsolete cloud access fields: "
+                f"{error}"
             ) from error
 
         self._raise_for_firestore_error(response)

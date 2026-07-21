@@ -11,7 +11,8 @@ python main.py
 - Menu with About and Help
 - Message dialogs
 - Nintendo DS-family discovery through IGDB
-- Firebase-backed cloud library sharing and synchronization
+- Firebase-backed cloud metadata snapshots
+- Read-only Share Keys with Add and Overwrite imports
 
 ## Notes
 
@@ -35,3 +36,11 @@ RomDex calls IGDB through a Firebase HTTPS Function. IGDB credentials and the
 Twitch access token stay on the server and are not bundled into the desktop
 application. See [the IGDB proxy deployment guide](docs/igdb_proxy_deployment.md)
 for the one-time project-owner setup.
+
+## Cloud library access
+
+Share Keys import read-only metadata. Add keeps the current local library;
+Overwrite replaces its metadata while preserving this installation's own cloud
+identity and Share Key. Existing Firestore data does not need to be cleared.
+See [the cloud library deployment guide](docs/cloud_library_deployment.md) for
+the rules/function deployment and automatic cleanup steps.

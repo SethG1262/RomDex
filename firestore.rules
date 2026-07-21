@@ -1,0 +1,36 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function ownsLibrary(libraryId) {
+      return signedIn()
+        && get(
+          /databases/$(database)/documents/libraries/$(libraryId)
+        ).data.owner_uid == request.auth.uid;
+    }
+
+    match /libraries/{libraryId} {
+      // Share Key imports go through read_shared_library. Direct Firestore
+      // access remains private to this installation's anonymous owner UID.
+      allow read: if ownsLibrary(libraryId);
+
+      allow create: if signedIn()
+        && request.resource.data.owner_uid == request.auth.uid;
+
+      allow update: if signedIn()
+        && resource.data.owner_uid == request.auth.uid
+        && request.resource.data.owner_uid == resource.data.owner_uid;
+
+      allow delete: if signedIn()
+        && resource.data.owner_uid == request.auth.uid;
+
+      match /games/{gameId} {
+        allow read, create, update, delete: if ownsLibrary(libraryId);
+      }
+    }
+  }
+}

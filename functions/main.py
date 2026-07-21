@@ -2,14 +2,16 @@
 
 import json
 import logging
+import re
 import threading
 import time
 from typing import Any
 
 import requests
-from firebase_admin import auth, get_app, initialize_app
+from firebase_admin import auth, firestore, get_app, initialize_app
 from firebase_functions import https_fn
 from firebase_functions.params import SecretParam
+from google.cloud.firestore_v1.base_query import FieldFilter
 
 
 try:
@@ -21,7 +23,7 @@ IGDB_CLIENT_ID = SecretParam("IGDB_CLIENT_ID")
 IGDB_CLIENT_SECRET = SecretParam("IGDB_CLIENT_SECRET")
 
 TWITCH_TOKEN_URL = "https://id.twitch.tv/oauth2/token"
-IGDB_API_ROOT = "https://api.igdb.com/v4"   
+IGDB_API_ROOT = "https://api.igdb.com/v4"
 DS_FAMILY_PLATFORM_IDS = (20, 37, 159)
 
 GAME_FIELDS = (
@@ -38,6 +40,7 @@ MAX_OFFSET = 10_000
 MAX_SEARCH_LENGTH = 120
 TOKEN_REFRESH_MARGIN_SECONDS = 300
 MIN_IGDB_REQUEST_INTERVAL_SECONDS = 0.26
+SHARE_KEY_PATTERN = re.compile(r"^RDX-SHARE-[A-Za-z0-9_-]{20,}$")
 
 _access_token: str | None = None
 _access_token_expires_at = 0.0
@@ -350,5 +353,76 @@ def igdb_proxy(request: https_fn.Request) -> https_fn.Response:
         logging.exception("Unexpected IGDB proxy failure.")
         return _json_response(
             {"error": {"message": "The RomDex IGDB service failed."}},
+            status=500,
+        )
+
+
+@https_fn.on_request(
+    region="us-central1",
+    max_instances=1,
+    concurrency=20,
+    timeout_sec=30,
+)
+def read_shared_library(request: https_fn.Request) -> https_fn.Response:
+    """Returns read-only metadata only when the Share Key is presented."""
+
+    try:
+        _verify_firebase_user(request)
+        payload = _read_request_payload(request)
+        share_key = payload.get("share_key")
+
+        if not isinstance(share_key, str):
+            raise ProxyError("share_key must be a string.", 400)
+
+        share_key = share_key.strip()
+        if not SHARE_KEY_PATTERN.fullmatch(share_key):
+            raise ProxyError("The RomDex Share Key format is invalid.", 400)
+
+        database = firestore.client()
+        matches = list(
+            database.collection("libraries")
+            .where(filter=FieldFilter("share_id", "==", share_key))
+            .limit(1)
+            .stream()
+        )
+        if not matches:
+            raise ProxyError("No cloud library accepts that Share Key.", 404)
+
+        library_snapshot = matches[0]
+        library = library_snapshot.to_dict() or {}
+        games = []
+
+        for game_snapshot in (
+            library_snapshot.reference.collection("games").stream()
+        ):
+            game = game_snapshot.to_dict() or {}
+            game["cloud_id"] = game_snapshot.id
+            games.append(game)
+
+        games.sort(
+            key=lambda game: str(game.get("title") or "").casefold()
+        )
+
+        return _json_response({
+            "library": {
+                "library_id": library.get(
+                    "library_id",
+                    library_snapshot.id,
+                ),
+                "share_id": library.get("share_id", share_key),
+                "name": library.get("name", "Shared Library"),
+                "game_count": len(games),
+            },
+            "games": games,
+        })
+    except ProxyError as error:
+        return _json_response(
+            {"error": {"message": error.message}},
+            status=error.status,
+        )
+    except Exception:
+        logging.exception("Unexpected shared-library read failure.")
+        return _json_response(
+            {"error": {"message": "The RomDex sharing service failed."}},
             status=500,
         )
