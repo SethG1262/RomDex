@@ -8,10 +8,9 @@ import time
 from typing import Any
 
 import requests
-from firebase_admin import auth, firestore, get_app, initialize_app
+from firebase_admin import auth, get_app, initialize_app
 from firebase_functions import https_fn
 from firebase_functions.params import SecretParam
-from google.cloud.firestore_v1.base_query import FieldFilter
 
 
 try:
@@ -367,6 +366,12 @@ def read_shared_library(request: https_fn.Request) -> https_fn.Response:
     """Returns read-only metadata only when the Share Key is presented."""
 
     try:
+        # Firestore is imported lazily. Loading the complete Firestore SDK at
+        # module import time can exceed Firebase CLI's function-discovery
+        # timeout on Windows, especially from a OneDrive project folder.
+        from firebase_admin import firestore
+        from google.cloud.firestore_v1.base_query import FieldFilter
+
         _verify_firebase_user(request)
         payload = _read_request_payload(request)
         share_key = payload.get("share_key")
