@@ -10,6 +10,8 @@ python main.py
 - Entry field and buttons
 - Menu with About and Help
 - Message dialogs
+- Nintendo DS-family discovery through IGDB
+- Firebase-backed cloud library sharing and synchronization
 
 ## Notes
 
@@ -27,3 +29,9 @@ pip install -r requirements.txt
 
 2. Run the app once; the SQLite file will be created at `data/romdex.db` and the `games` table will be created automatically.
 
+## IGDB security
+
+RomDex calls IGDB through a Firebase HTTPS Function. IGDB credentials and the
+Twitch access token stay on the server and are not bundled into the desktop
+application. See [the IGDB proxy deployment guide](docs/igdb_proxy_deployment.md)
+for the one-time project-owner setup.

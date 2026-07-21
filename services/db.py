@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 
@@ -43,6 +43,53 @@ def init_db():
     # Creates all database tables that are defined by models inheriting from Base.
     # If the tables already exist, SQLAlchemy will leave them alone.
     Base.metadata.create_all(bind=engine)
+    _migrate_games_cloud_id()
+
+
+def _migrate_games_cloud_id():
+    """
+    Adds stable cloud IDs to databases created by older RomDex versions.
+
+    Existing IGDB entries retain their IGDB identity. Existing local-only
+    entries retain the legacy ``local_<database id>`` identity so upgrading
+    does not create duplicate Firestore documents on the next sync.
+    """
+    inspector = inspect(engine)
+
+    if "games" not in inspector.get_table_names():
+        return
+
+    column_names = {
+        column["name"]
+        for column in inspector.get_columns("games")
+    }
+
+    with engine.begin() as connection:
+        if "cloud_id" not in column_names:
+            connection.execute(
+                text("ALTER TABLE games ADD COLUMN cloud_id VARCHAR")
+            )
+
+        connection.execute(
+            text(
+                """
+                UPDATE games
+                SET cloud_id = CASE
+                    WHEN igdb_id IS NOT NULL
+                        THEN 'igdb_' || CAST(igdb_id AS TEXT)
+                    ELSE 'local_' || CAST(id AS TEXT)
+                END
+                WHERE cloud_id IS NULL OR TRIM(cloud_id) = ''
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "ix_games_cloud_id ON games (cloud_id)"
+            )
+        )
 
 
 def get_db():

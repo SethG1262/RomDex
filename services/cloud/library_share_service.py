@@ -1,5 +1,3 @@
-import os
-
 import requests
 from dotenv import load_dotenv
 
@@ -9,6 +7,7 @@ from services.cloud.cloud_library_service import (
 )
 from services.cloud.firebase_auth_service import FirebaseAuthService
 from services.cloud.library_key_service import LibraryKeyService
+from services.cloud.firebase_public_config import get_firebase_project_id
 
 
 class LibraryShareError(Exception):
@@ -35,14 +34,11 @@ class LibraryShareService:
     ):
         load_dotenv()
 
-        self.project_id = os.getenv(
-            "FIREBASE_PROJECT_ID",
-            ""
-        ).strip()
+        self.project_id = get_firebase_project_id()
 
         if not self.project_id:
             raise LibraryShareError(
-                "FIREBASE_PROJECT_ID is missing from the .env file."
+                "The public Firebase project ID is missing from RomDex."
             )
 
         self.auth_service = (
@@ -165,24 +161,28 @@ class LibraryShareService:
     def import_shared_library(
         self,
         share_key,
-        game_repository
+        game_repository,
+        mode="additive"
     ):
         """
         Downloads a shared library and merges its games into SQLite.
 
-        Existing games are skipped. ROM paths and local filenames are not
-        imported because they belong to the source computer.
+        Additive mode skips matching games. Overwrite mode refreshes matching
+        metadata in place. ROM paths and local filenames are never imported
+        or replaced because they belong to the destination computer.
         """
         shared_data = self.download_shared_library(share_key)
 
         import_result = game_repository.import_cloud_games(
-            shared_data["games"]
+            shared_data["games"],
+            mode=mode
         )
 
         return {
             "library": shared_data["library"],
             "cloud_game_count": len(shared_data["games"]),
             "imported_count": import_result["imported_count"],
+            "updated_count": import_result["updated_count"],
             "skipped_count": import_result["skipped_count"]
         }
 

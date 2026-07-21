@@ -11,6 +11,7 @@ class LibraryExportService:
         Converts one local Game object into a Firestore-safe dictionary.
         """
         return {
+            "cloud_id": getattr(game, "cloud_id", None),
             "local_source_id": game.id,
             "igdb_id": game.igdb_id,
             "title": game.title or "Unknown Title",
@@ -36,13 +37,23 @@ class LibraryExportService:
         """
         Generates a stable Firestore document ID for one exported game.
 
-        IGDB games use their IGDB ID. Local-only games use their local
-        SQLite ID so repeated syncs update the same Firestore document.
+        IGDB games use their IGDB ID. Local-only games use a persistent
+        cloud ID that follows the record across RomDex installations.
         """
         igdb_id = exported_game.get("igdb_id")
 
         if igdb_id is not None:
             return f"igdb_{igdb_id}"
+
+        cloud_id = (exported_game.get("cloud_id") or "").strip()
+
+        if cloud_id:
+            if "/" in cloud_id:
+                raise ValueError(
+                    "A cloud game ID cannot contain a forward slash."
+                )
+
+            return cloud_id
 
         local_source_id = exported_game.get("local_source_id")
 
@@ -51,4 +62,6 @@ class LibraryExportService:
                 "The exported game is missing both IGDB and local IDs."
             )
 
+        # Compatibility fallback for old or test records. Current database
+        # migrations populate cloud_id before synchronization begins.
         return f"local_{local_source_id}"

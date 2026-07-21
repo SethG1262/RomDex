@@ -1,4 +1,3 @@
-import os
 from datetime import datetime, timezone
 
 import requests
@@ -14,6 +13,7 @@ from services.cloud.cloud_config_service import (
     CloudConfigService
 )
 from services.cloud.library_key_service import LibraryKeyService
+from services.cloud.firebase_public_config import get_firebase_project_id
 
 
 class CloudLibraryError(Exception):
@@ -33,6 +33,13 @@ class CloudLibraryService:
         "projects/{project_id}/databases/(default)/documents"
     )
 
+    SYNC_MODE_ADDITIVE = "additive"
+    SYNC_MODE_MIRROR = "mirror"
+    SYNC_MODES = {
+        SYNC_MODE_ADDITIVE,
+        SYNC_MODE_MIRROR
+    }
+
     def __init__(
         self,
         auth_service=None,
@@ -42,15 +49,11 @@ class CloudLibraryService:
     ):
         load_dotenv()
 
-        self.project_id = os.getenv(
-            "FIREBASE_PROJECT_ID",
-            ""
-        ).strip()
+        self.project_id = get_firebase_project_id()
 
         if not self.project_id:
             raise CloudLibraryError(
-                "FIREBASE_PROJECT_ID is missing. "
-                "Add it to the project's .env file."
+                "The public Firebase project ID is missing from RomDex."
             )
 
         try:
@@ -87,16 +90,21 @@ class CloudLibraryService:
     def sync_library(
         self,
         games,
-        library_name="My RomDex Library"
+        library_name="My RomDex Library",
+        mode=SYNC_MODE_ADDITIVE
     ):
         """
-        Creates or reuses this installation's cloud library, then uploads
-        the current local games.
+        Creates or reuses this installation's cloud library, then
+        synchronizes the current local games.
 
         On the first sync, a new Firestore library is created and its IDs
         are saved locally. Later syncs reuse the saved library ID so
-        duplicate cloud libraries are not created.
+        duplicate cloud libraries are not created. Additive mode retains
+        cloud-only games. Mirror mode deletes cloud-only games so Firestore
+        exactly matches the local metadata library.
         """
+        self._validate_sync_mode(mode)
+
         try:
             config = self.config_service.load_config()
         except CloudConfigError as error:
@@ -139,7 +147,8 @@ class CloudLibraryService:
 
         upload_result = self.upload_library_games(
             library_id=library_id,
-            games=games
+            games=games,
+            mode=mode
         )
 
         active_config = self.config_service.load_config()
@@ -154,6 +163,11 @@ class CloudLibraryService:
             "uploaded_count": upload_result[
                 "uploaded_count"
             ],
+            "deleted_count": upload_result["deleted_count"],
+            "retained_count": upload_result["retained_count"],
+            "duplicate_count": upload_result["duplicate_count"],
+            "cloud_game_count": upload_result["cloud_game_count"],
+            "mode": mode,
             "created_new_library": (
                 created_new_library
             )
@@ -224,13 +238,21 @@ class CloudLibraryService:
         self._raise_for_firestore_error(response)
         return self._decode_fields(response.json().get("fields", {}))
 
-    def upload_library_games(self, library_id, games):
+    def upload_library_games(
+        self,
+        library_id,
+        games,
+        mode=SYNC_MODE_ADDITIVE
+    ):
         """
-        Uploads local Game objects into the library's games subcollection.
+        Synchronizes local Game objects with the Firestore subcollection.
 
-        Existing cloud documents with the same stable game IDs are updated.
-        ROM files, ROM paths, and local file names are never uploaded.
+        Existing documents with the same stable cloud IDs are updated rather
+        than duplicated. Mirror mode also deletes cloud documents that no
+        longer exist locally. ROM paths and local file names are never sent.
         """
+        self._validate_sync_mode(mode)
+
         library = self.get_library(library_id)
 
         if library.get("owner_uid") != self.auth_service.uid:
@@ -238,14 +260,33 @@ class CloudLibraryService:
                 "This Firebase installation does not own that cloud library."
             )
 
+        existing_documents = self._list_library_game_documents(
+            library_id
+        )
+        existing_ids = {
+            document["cloud_id"]
+            for document in existing_documents
+        }
+
         exported_games = self.export_service.export_games(games)
-        uploaded_count = 0
+        local_documents = {}
+        duplicate_count = 0
 
         for exported_game in exported_games:
             cloud_game_id = self.export_service.get_cloud_game_id(
                 exported_game
             )
+            exported_game["cloud_id"] = cloud_game_id
 
+            if cloud_game_id in local_documents:
+                duplicate_count += 1
+                continue
+
+            local_documents[cloud_game_id] = exported_game
+
+        uploaded_count = 0
+
+        for cloud_game_id, exported_game in local_documents.items():
             self._upsert_game_document(
                 library_id=library_id,
                 game_id=cloud_game_id,
@@ -253,14 +294,37 @@ class CloudLibraryService:
             )
             uploaded_count += 1
 
+        local_ids = set(local_documents)
+        cloud_only_ids = existing_ids - local_ids
+        deleted_count = 0
+
+        if mode == self.SYNC_MODE_MIRROR:
+            for cloud_game_id in sorted(cloud_only_ids):
+                self._delete_game_document(
+                    library_id=library_id,
+                    game_id=cloud_game_id
+                )
+                deleted_count += 1
+
+            final_ids = local_ids
+            retained_count = 0
+        else:
+            final_ids = existing_ids | local_ids
+            retained_count = len(cloud_only_ids)
+
         self._update_library_summary(
             library_id=library_id,
-            game_count=uploaded_count
+            game_count=len(final_ids)
         )
 
         return {
             "library_id": library_id,
-            "uploaded_count": uploaded_count
+            "uploaded_count": uploaded_count,
+            "deleted_count": deleted_count,
+            "retained_count": retained_count,
+            "duplicate_count": duplicate_count,
+            "cloud_game_count": len(final_ids),
+            "mode": mode
         }
 
     def get_library_games(self, library_id):
@@ -270,30 +334,68 @@ class CloudLibraryService:
         if not self.key_service.is_valid_library_id(library_id):
             raise CloudLibraryError("The library ID format is invalid.")
 
+        documents = self._list_library_game_documents(library_id)
+
+        return [document["fields"] for document in documents]
+
+    def _list_library_game_documents(self, library_id):
+        """Returns every game document, following Firestore pagination."""
+        if not self.key_service.is_valid_library_id(library_id):
+            raise CloudLibraryError("The library ID format is invalid.")
+
         url = (
             f"{self.documents_url}/libraries/"
             f"{library_id}/games"
         )
+        page_token = None
+        decoded_documents = []
 
-        try:
-            response = requests.get(
-                url,
-                headers=self.auth_service.get_auth_headers(),
-                timeout=20
-            )
-        except requests.RequestException as error:
-            raise CloudLibraryError(
-                f"Could not connect to Cloud Firestore: {error}"
-            ) from error
+        while True:
+            params = {"pageSize": 100}
 
-        self._raise_for_firestore_error(response)
+            if page_token:
+                params["pageToken"] = page_token
 
-        documents = response.json().get("documents", [])
+            try:
+                response = requests.get(
+                    url,
+                    params=params,
+                    headers=self.auth_service.get_auth_headers(),
+                    timeout=20
+                )
+            except requests.RequestException as error:
+                raise CloudLibraryError(
+                    f"Could not connect to Cloud Firestore: {error}"
+                ) from error
 
-        return [
-            self._decode_fields(document.get("fields", {}))
-            for document in documents
-        ]
+            self._raise_for_firestore_error(response)
+            response_data = response.json()
+
+            for document in response_data.get("documents", []):
+                cloud_game_id = (
+                    document.get("name", "").rsplit("/", 1)[-1]
+                )
+
+                if not cloud_game_id:
+                    continue
+
+                fields = self._decode_fields(
+                    document.get("fields", {})
+                )
+                # The Firestore document ID is authoritative. Older cloud
+                # records may not yet contain a cloud_id field.
+                fields["cloud_id"] = cloud_game_id
+                decoded_documents.append({
+                    "cloud_id": cloud_game_id,
+                    "fields": fields
+                })
+
+            page_token = response_data.get("nextPageToken")
+
+            if not page_token:
+                break
+
+        return decoded_documents
 
     def _upsert_game_document(self, library_id, game_id, game_data):
         url = (
@@ -311,6 +413,25 @@ class CloudLibraryService:
         except requests.RequestException as error:
             raise CloudLibraryError(
                 f"Could not upload game '{game_data.get('title')}': {error}"
+            ) from error
+
+        self._raise_for_firestore_error(response)
+
+    def _delete_game_document(self, library_id, game_id):
+        url = (
+            f"{self.documents_url}/libraries/"
+            f"{library_id}/games/{game_id}"
+        )
+
+        try:
+            response = requests.delete(
+                url,
+                headers=self.auth_service.get_auth_headers(),
+                timeout=20
+            )
+        except requests.RequestException as error:
+            raise CloudLibraryError(
+                f"Could not remove cloud game '{game_id}': {error}"
             ) from error
 
         self._raise_for_firestore_error(response)
@@ -343,6 +464,10 @@ class CloudLibraryService:
             ) from error
 
         self._raise_for_firestore_error(response)
+
+    def _validate_sync_mode(self, mode):
+        if mode not in self.SYNC_MODES:
+            raise CloudLibraryError(f"Unknown cloud sync mode: {mode}")
 
     @staticmethod
     def _utc_now():

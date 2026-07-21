@@ -1,10 +1,11 @@
 import json
-import os
 import time
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
+
+from services.cloud.firebase_public_config import get_firebase_api_key
 
 
 class FirebaseAuthError(Exception):
@@ -31,11 +32,11 @@ class FirebaseAuthService:
     def __init__(self, session_file=None):
         load_dotenv()
 
-        self.api_key = os.getenv("FIREBASE_API_KEY", "").strip()
+        self.api_key = get_firebase_api_key()
 
         if not self.api_key:
             raise FirebaseAuthError(
-                "FIREBASE_API_KEY is missing. Add it to the project's .env file."
+                "The public Firebase API key is missing from RomDex."
             )
 
         if session_file is None:
@@ -218,8 +219,7 @@ class FirebaseAuthService:
                 "Firebase Authentication > Sign-in method."
             ),
             "API_KEY_INVALID": (
-                "The Firebase API key is invalid. Check FIREBASE_API_KEY "
-                "in the .env file."
+                "The Firebase API key bundled with RomDex is invalid."
             ),
             "PROJECT_NOT_FOUND": (
                 "Firebase could not find the configured project."

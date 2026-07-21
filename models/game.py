@@ -13,6 +13,11 @@ class Game(Base):
     # This is the primary key for each game record.
     id = Column(Integer, primary_key=True, index=True)
 
+    # Stable identity used for cloud synchronization.
+    # Unlike the local database ID, this value follows the game when its
+    # metadata is imported on another RomDex installation.
+    cloud_id = Column(String, unique=True, nullable=True, index=True)
+
     # IGDB metadata fields.
     # These store game information collected from the IGDB API.
     igdb_id = Column(Integer, unique=True, nullable=True)

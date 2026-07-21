@@ -1,4 +1,5 @@
 from pathlib import Path
+from uuid import uuid4
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -15,6 +16,13 @@ class GameRepository:
         "Nintendo DS": {".nds"},
         "Nintendo DSi": {".nds"},
         "Nintendo 3DS": {".3ds", ".cci", ".cxi"}
+    }
+
+    IMPORT_MODE_ADDITIVE = "additive"
+    IMPORT_MODE_OVERWRITE = "overwrite"
+    IMPORT_MODES = {
+        IMPORT_MODE_ADDITIVE,
+        IMPORT_MODE_OVERWRITE
     }
 
     def __init__(self):
@@ -36,6 +44,7 @@ class GameRepository:
                 return existing_game
 
             game = Game(
+                cloud_id=f"igdb_{igdb_id}",
                 igdb_id=igdb_id,
                 title=game_data.get("name", "Unknown Title"),
                 summary=game_data.get("summary"),
@@ -72,6 +81,7 @@ class GameRepository:
 
         try:
             game = Game(
+                cloud_id=f"local_{uuid4().hex}",
                 title=path.stem,
                 platform="Nintendo DS",
                 file_name=path.name,
@@ -277,27 +287,69 @@ class GameRepository:
             self.session.rollback()
             raise
 
-    def import_cloud_game(self, cloud_game):
+    def import_cloud_game(
+        self,
+        cloud_game,
+        mode=IMPORT_MODE_ADDITIVE
+    ):
         """
-        Imports one cloud-safe game record without device-specific paths.
+        Imports or updates one cloud-safe game record.
+
+        Additive mode leaves matching local metadata unchanged. Overwrite
+        mode refreshes matching metadata while preserving local ROM paths.
         """
+        if mode not in self.IMPORT_MODES:
+            raise ValueError(f"Unknown cloud import mode: {mode}")
+
         igdb_id = cloud_game.get("igdb_id")
         title = (cloud_game.get("title") or "Unknown Title").strip()
         platform = cloud_game.get("platform") or "Unknown"
+        cloud_id = self._get_imported_cloud_id(
+            cloud_game=cloud_game,
+            igdb_id=igdb_id
+        )
 
-        if igdb_id is not None:
+        existing_game = None
+
+        if cloud_id:
+            existing_game = self.get_game_by_cloud_id(cloud_id)
+
+        if existing_game is None and igdb_id is not None:
             existing_game = self.get_game_by_igdb_id(igdb_id)
-        else:
+
+        if existing_game is None and igdb_id is None:
             existing_game = self.get_game_by_title_and_platform(
                 title,
                 platform
             )
 
         if existing_game:
-            return existing_game, False
+            try:
+                if cloud_id and existing_game.cloud_id != cloud_id:
+                    existing_game.cloud_id = cloud_id
+
+                if mode == self.IMPORT_MODE_OVERWRITE:
+                    self._apply_cloud_metadata(
+                        game=existing_game,
+                        cloud_game=cloud_game,
+                        title=title,
+                        platform=platform
+                    )
+                    action = "updated"
+                else:
+                    action = "skipped"
+
+                self.session.commit()
+                self.session.refresh(existing_game)
+                return existing_game, action
+
+            except SQLAlchemyError:
+                self.session.rollback()
+                raise
 
         try:
             game = Game(
+                cloud_id=cloud_id or f"local_{uuid4().hex}",
                 igdb_id=igdb_id,
                 title=title,
                 summary=cloud_game.get("summary"),
@@ -314,29 +366,56 @@ class GameRepository:
             self.session.commit()
             self.session.refresh(game)
 
-            return game, True
+            return game, "imported"
 
         except SQLAlchemyError:
             self.session.rollback()
             raise
 
-    def import_cloud_games(self, cloud_games):
+    def import_cloud_games(
+        self,
+        cloud_games,
+        mode=IMPORT_MODE_ADDITIVE
+    ):
         """
-        Imports cloud records and skips duplicate local games.
+        Imports cloud records without creating duplicate local games.
+
+        Duplicate records inside the incoming cloud library are processed
+        once. Overwrite mode updates matching rows in place, so attached ROM
+        paths and local file names remain device-specific and untouched.
         """
+        if mode not in self.IMPORT_MODES:
+            raise ValueError(f"Unknown cloud import mode: {mode}")
+
         imported_count = 0
+        updated_count = 0
         skipped_count = 0
+        seen_identities = set()
 
         for cloud_game in cloud_games:
-            _, was_imported = self.import_cloud_game(cloud_game)
+            identity = self._get_cloud_import_identity(cloud_game)
 
-            if was_imported:
+            if identity in seen_identities:
+                skipped_count += 1
+                continue
+
+            seen_identities.add(identity)
+
+            _, action = self.import_cloud_game(
+                cloud_game,
+                mode=mode
+            )
+
+            if action == "imported":
                 imported_count += 1
+            elif action == "updated":
+                updated_count += 1
             else:
                 skipped_count += 1
 
         return {
             "imported_count": imported_count,
+            "updated_count": updated_count,
             "skipped_count": skipped_count
         }
 
@@ -353,6 +432,14 @@ class GameRepository:
             self.session
             .query(Game)
             .filter(Game.igdb_id == igdb_id)
+            .first()
+        )
+
+    def get_game_by_cloud_id(self, cloud_id):
+        return (
+            self.session
+            .query(Game)
+            .filter(Game.cloud_id == cloud_id)
             .first()
         )
 
@@ -399,6 +486,48 @@ class GameRepository:
 
     def close(self):
         self.session.close()
+
+    @staticmethod
+    def _get_imported_cloud_id(cloud_game, igdb_id=None):
+        if igdb_id is not None:
+            return f"igdb_{igdb_id}"
+
+        cloud_id = (
+            cloud_game.get("cloud_id")
+            or cloud_game.get("_cloud_game_id")
+            or ""
+        )
+
+        return str(cloud_id).strip() or None
+
+    def _get_cloud_import_identity(self, cloud_game):
+        igdb_id = cloud_game.get("igdb_id")
+        cloud_id = self._get_imported_cloud_id(
+            cloud_game=cloud_game,
+            igdb_id=igdb_id
+        )
+
+        if cloud_id:
+            return ("cloud", cloud_id.casefold())
+
+        title = (cloud_game.get("title") or "Unknown Title").strip()
+        platform = (cloud_game.get("platform") or "Unknown").strip()
+        return ("metadata", title.casefold(), platform.casefold())
+
+    @staticmethod
+    def _apply_cloud_metadata(game, cloud_game, title, platform):
+        game.title = title
+        game.summary = cloud_game.get("summary")
+        game.storyline = cloud_game.get("storyline")
+        game.cover_url = cloud_game.get("cover_url")
+        game.release_year = cloud_game.get("release_year")
+        game.platform = platform
+
+        # A local ROM attachment always keeps the stronger Owned status.
+        if game.rom_path:
+            game.status = "Owned"
+        else:
+            game.status = cloud_game.get("status") or "Saved"
 
     def _validate_rom_path(self, rom_path, platform):
         """

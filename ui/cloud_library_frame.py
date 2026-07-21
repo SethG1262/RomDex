@@ -44,6 +44,14 @@ class CloudLibraryFrame(ttk.Frame):
         )
 
         self._busy = False
+        self.sync_mode_var = tk.StringVar(
+            master=self,
+            value=CloudLibraryService.SYNC_MODE_ADDITIVE
+        )
+        self.import_mode_var = tk.StringVar(
+            master=self,
+            value=GameRepository.IMPORT_MODE_ADDITIVE
+        )
         self._create_widgets()
         self.refresh_status()
 
@@ -180,8 +188,58 @@ class CloudLibraryFrame(ttk.Frame):
             pady=(0, 15)
         )
 
-        self.sync_button = ttk.Button(
+        ttk.Label(
             action_frame,
+            text="Synchronization mode:"
+        ).pack(anchor="w")
+
+        sync_mode_frame = ttk.Frame(action_frame)
+        sync_mode_frame.pack(
+            fill="x",
+            pady=(6, 4)
+        )
+
+        additive_sync_button = ttk.Radiobutton(
+            sync_mode_frame,
+            text="Additive — keep cloud-only games",
+            variable=self.sync_mode_var,
+            value=CloudLibraryService.SYNC_MODE_ADDITIVE,
+            command=self._update_sync_mode_description
+        )
+        additive_sync_button.pack(
+            side="left",
+            padx=(0, 18)
+        )
+
+        mirror_sync_button = ttk.Radiobutton(
+            sync_mode_frame,
+            text="Mirror — cloud matches this PC",
+            variable=self.sync_mode_var,
+            value=CloudLibraryService.SYNC_MODE_MIRROR,
+            command=self._update_sync_mode_description
+        )
+        mirror_sync_button.pack(side="left")
+
+        self.sync_mode_buttons = (
+            additive_sync_button,
+            mirror_sync_button
+        )
+
+        self.sync_mode_description = ttk.Label(
+            action_frame,
+            text="",
+            wraplength=850
+        )
+        self.sync_mode_description.pack(
+            anchor="w",
+            pady=(0, 10)
+        )
+
+        action_button_frame = ttk.Frame(action_frame)
+        action_button_frame.pack(fill="x")
+
+        self.sync_button = ttk.Button(
+            action_button_frame,
             text="Sync Local Library",
             command=self._sync_library
         )
@@ -191,7 +249,7 @@ class CloudLibraryFrame(ttk.Frame):
         )
 
         self.copy_share_button = ttk.Button(
-            action_frame,
+            action_button_frame,
             text="Copy Share Key",
             command=self._copy_share_key
         )
@@ -201,7 +259,7 @@ class CloudLibraryFrame(ttk.Frame):
         )
 
         self.refresh_button = ttk.Button(
-            action_frame,
+            action_button_frame,
             text="Refresh Status",
             command=self.refresh_status
         )
@@ -226,6 +284,36 @@ class CloudLibraryFrame(ttk.Frame):
             text="Public share key:"
         ).pack(
             anchor="w"
+        )
+
+        import_mode_frame = ttk.Frame(import_frame)
+        import_mode_frame.pack(
+            fill="x",
+            pady=(6, 2)
+        )
+
+        additive_import_button = ttk.Radiobutton(
+            import_mode_frame,
+            text="Add new games only",
+            variable=self.import_mode_var,
+            value=GameRepository.IMPORT_MODE_ADDITIVE
+        )
+        additive_import_button.pack(
+            side="left",
+            padx=(0, 18)
+        )
+
+        overwrite_import_button = ttk.Radiobutton(
+            import_mode_frame,
+            text="Overwrite matching metadata",
+            variable=self.import_mode_var,
+            value=GameRepository.IMPORT_MODE_OVERWRITE
+        )
+        overwrite_import_button.pack(side="left")
+
+        self.import_mode_buttons = (
+            additive_import_button,
+            overwrite_import_button
         )
 
         import_entry_frame = ttk.Frame(
@@ -262,8 +350,9 @@ class CloudLibraryFrame(ttk.Frame):
         ttk.Label(
             import_frame,
             text=(
-                "Only game metadata is imported. "
-                "ROM files and device-specific paths are never downloaded."
+                "Only game metadata is imported. Overwrite mode updates "
+                "matching rows in place; ROM files and device-specific "
+                "paths are never downloaded or replaced."
             ),
             wraplength=850
         ).pack(
@@ -296,6 +385,7 @@ class CloudLibraryFrame(ttk.Frame):
         self._set_activity(
             "Cloud controls are ready."
         )
+        self._update_sync_mode_description()
 
     def refresh_status(self):
         """
@@ -356,18 +446,34 @@ class CloudLibraryFrame(ttk.Frame):
         if self._busy:
             return
 
+        mode = self.sync_mode_var.get()
+
+        if mode == CloudLibraryService.SYNC_MODE_MIRROR:
+            confirmed = messagebox.askyesno(
+                "Mirror Cloud Library?",
+                "Mirror mode makes the cloud library exactly match "
+                "this PC. Cloud-only game metadata will be permanently "
+                "deleted. ROM files are never uploaded or deleted.\n\n"
+                "Continue?",
+                parent=self
+            )
+
+            if not confirmed:
+                return
+
         self._set_busy(True)
         self._set_activity(
-            "Synchronizing local library with Firestore..."
+            f"Running {mode} synchronization with Firestore..."
         )
 
         thread = threading.Thread(
             target=self._sync_worker,
+            args=(mode,),
             daemon=True
         )
         thread.start()
 
-    def _sync_worker(self):
+    def _sync_worker(self, mode):
         repository = GameRepository()
 
         try:
@@ -376,7 +482,8 @@ class CloudLibraryFrame(ttk.Frame):
             result = (
                 self.cloud_library_service.sync_library(
                     games=games,
-                    library_name="My RomDex Library"
+                    library_name="My RomDex Library",
+                    mode=mode
                 )
             )
 
@@ -409,12 +516,21 @@ class CloudLibraryFrame(ttk.Frame):
         self._set_activity(
             f"{action_text} cloud library "
             f"{result['library_id']}.\n"
-            f"Uploaded {result['uploaded_count']} game record(s)."
+            f"Mode: {result['mode'].title()}\n"
+            f"Uploaded or updated: {result['uploaded_count']}\n"
+            f"Deleted from cloud: {result['deleted_count']}\n"
+            f"Cloud-only games retained: {result['retained_count']}\n"
+            f"Duplicate local identities skipped: "
+            f"{result['duplicate_count']}\n"
+            f"Final cloud total: {result['cloud_game_count']}"
         )
 
         messagebox.showinfo(
             "Cloud Sync Complete",
-            f"Uploaded {result['uploaded_count']} game record(s)."
+            f"Synchronized {result['uploaded_count']} game record(s).\n"
+            f"Deleted {result['deleted_count']} cloud-only record(s).\n"
+            f"Cloud library total: {result['cloud_game_count']}.",
+            parent=self
         )
 
     def _copy_share_key(self):
@@ -461,19 +577,22 @@ class CloudLibraryFrame(ttk.Frame):
             )
             return
 
+        import_mode = self.import_mode_var.get()
+
         self._set_busy(True)
         self._set_activity(
-            "Downloading and importing shared library metadata..."
+            "Downloading shared library metadata using "
+            f"{import_mode} mode..."
         )
 
         thread = threading.Thread(
             target=self._import_worker,
-            args=(share_key,),
+            args=(share_key, import_mode),
             daemon=True
         )
         thread.start()
 
-    def _import_worker(self, share_key):
+    def _import_worker(self, share_key, import_mode):
         repository = GameRepository()
 
         try:
@@ -481,7 +600,8 @@ class CloudLibraryFrame(ttk.Frame):
                 self.library_share_service
                 .import_shared_library(
                     share_key=share_key,
-                    game_repository=repository
+                    game_repository=repository,
+                    mode=import_mode
                 )
             )
 
@@ -513,6 +633,7 @@ class CloudLibraryFrame(ttk.Frame):
         self._set_activity(
             f'Imported "{library_name}".\n'
             f"New games: {result['imported_count']}\n"
+            f"Matching games updated: {result['updated_count']}\n"
             f"Duplicates skipped: {result['skipped_count']}"
         )
 
@@ -527,7 +648,9 @@ class CloudLibraryFrame(ttk.Frame):
         messagebox.showinfo(
             "Shared Library Imported",
             f"Imported {result['imported_count']} new game(s).\n"
-            f"Skipped {result['skipped_count']} duplicate(s)."
+            f"Updated {result['updated_count']} matching game(s).\n"
+            f"Skipped {result['skipped_count']} duplicate(s).",
+            parent=self
         )
 
     def _show_operation_error(self, title, error):
@@ -553,12 +676,35 @@ class CloudLibraryFrame(ttk.Frame):
             state=state
         )
 
+        for button in self.sync_mode_buttons:
+            button.config(state=state)
+
+        for button in self.import_mode_buttons:
+            button.config(state=state)
+
         if busy:
             self.copy_share_button.config(
                 state="disabled"
             )
         else:
             self.refresh_status()
+
+    def _update_sync_mode_description(self):
+        if (
+            self.sync_mode_var.get()
+            == CloudLibraryService.SYNC_MODE_MIRROR
+        ):
+            text = (
+                "Mirror updates matching records, adds missing records, "
+                "and deletes cloud metadata that is absent on this PC."
+            )
+        else:
+            text = (
+                "Additive updates matching records and adds missing "
+                "records without deleting anything already in the cloud."
+            )
+
+        self.sync_mode_description.config(text=text)
 
     def _set_activity(self, message):
         self.activity_text.config(
